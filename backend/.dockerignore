@@ -1,0 +1,10 @@
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+.env
+.env.*
+# Development-only files: tests and tooling don't belong in the API image
+tests/
+pytest.ini
+requirements-dev.txt
+requirements.in
