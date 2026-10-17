@@ -1,0 +1,88 @@
+name: Backend
+
+# Tests the API on every change under backend/ or deploy/; on main it also builds the image,
+# pushes it to ECR and, if the lab is running, deploys it to EC2.
+on:
+  push:
+    branches: [main]
+    # deploy/cloudfront/ is applied by hand during setup (docs/aws-setup.md), not by this workflow
+    paths: ["backend/**", "deploy/**", "!deploy/cloudfront/**", ".github/workflows/backend.yml"]
+  pull_request:
+    paths: ["backend/**", "deploy/**", "!deploy/cloudfront/**", ".github/workflows/backend.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      # conftest.py creates a throwaway pharmacore_test_* database on this server and runs the migrations
+      - run: pytest
+        env:
+          TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/postgres
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # GitHub OIDC -> AWS role, no stored access keys
+      contents: read
+    # Shares a lock with lab-control so a deploy never races a start/stop
+    concurrency:
+      group: pharmacore-aws
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          mask-aws-account-id: true
+          aws-region: ${{ vars.AWS_REGION }}
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - name: Build and push the API image
+        id: image
+        run: |
+          REPO="${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}"
+          # t3.micro is x86_64, the same as the runner, so no emulation is needed
+          docker build --platform linux/amd64 -t "$REPO:$GITHUB_SHA" -t "$REPO:latest" backend
+          docker push "$REPO:$GITHUB_SHA"
+          docker push "$REPO:latest"
+          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+      - name: Deploy to EC2 (only if the lab is running)
+        run: |
+          STATE=$(aws ec2 describe-instances --instance-ids "${{ secrets.EC2_INSTANCE_ID }}" \
+            --query 'Reservations[0].Instances[0].State.Name' --output text)
+          if [ "$STATE" != "running" ]; then
+            echo "::notice::EC2 is $STATE. Image $GITHUB_SHA is in ECR as :latest; lab-control start will deploy it."
+            exit 0
+          fi
+          bash deploy/ship.sh "${{ secrets.EC2_INSTANCE_ID }}" "${{ steps.image.outputs.repo }}" "$GITHUB_SHA" "${{ vars.AWS_REGION }}"

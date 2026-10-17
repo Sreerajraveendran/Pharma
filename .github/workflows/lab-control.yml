@@ -1,0 +1,135 @@
+name: Lab control
+
+# Start the AWS lab before studying and stop it afterwards. EventBridge Scheduler also stops
+# everything nightly, which matters because AWS restarts a stopped RDS instance after 7 days.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Start or stop EC2 + RDS
+        type: choice
+        options: [start, stop]
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: pharmacore-aws
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  EC2_ID: ${{ secrets.EC2_INSTANCE_ID }}
+  RDS_ID: ${{ vars.RDS_INSTANCE_ID }}
+  CF_ID: ${{ secrets.CF_DISTRIBUTION_ID }}
+  CF_ORIGIN: ${{ vars.CF_API_ORIGIN_ID }}
+
+jobs:
+  start:
+    if: inputs.action == 'start'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          mask-aws-account-id: true
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Start RDS
+        run: |
+          STATUS=$(aws rds describe-db-instances --db-instance-identifier "$RDS_ID" \
+            --query 'DBInstances[0].DBInstanceStatus' --output text)
+          echo "RDS is $STATUS"
+          if [ "$STATUS" = "stopped" ]; then
+            aws rds start-db-instance --db-instance-identifier "$RDS_ID" >/dev/null
+          fi
+          aws rds wait db-instance-available --db-instance-identifier "$RDS_ID"
+          echo "RDS is available"
+
+      - name: Start EC2
+        id: ec2
+        run: |
+          aws ec2 start-instances --instance-ids "$EC2_ID" >/dev/null
+          aws ec2 wait instance-running --instance-ids "$EC2_ID"
+          aws ec2 wait instance-status-ok --instance-ids "$EC2_ID"
+          DNS=$(aws ec2 describe-instances --instance-ids "$EC2_ID" \
+            --query 'Reservations[0].Instances[0].PublicDnsName' --output text)
+          echo "EC2 public DNS: $DNS"
+          echo "dns=$DNS" >> "$GITHUB_OUTPUT"
+
+      # No Elastic IP (it is billed while stopped), so the public DNS changes on every start
+      - name: Point CloudFront /api/* at the new EC2 address
+        run: |
+          DNS="${{ steps.ec2.outputs.dns }}"
+          aws cloudfront get-distribution-config --id "$CF_ID" > cf.json
+          CURRENT=$(jq -r --arg id "$CF_ORIGIN" \
+            '.DistributionConfig.Origins.Items[] | select(.Id == $id) | .DomainName' cf.json)
+          if [ -z "$CURRENT" ]; then
+            echo "::error::No origin with id '$CF_ORIGIN' in distribution $CF_ID"; exit 1
+          fi
+          if [ "$CURRENT" = "$DNS" ]; then
+            echo "Origin already points at $DNS"; exit 0
+          fi
+          jq --arg id "$CF_ORIGIN" --arg dns "$DNS" \
+            '.DistributionConfig | .Origins.Items |= map(if .Id == $id then .DomainName = $dns else . end)' \
+            cf.json > cf-new.json
+          aws cloudfront update-distribution --id "$CF_ID" --if-match "$(jq -r .ETag cf.json)" \
+            --distribution-config file://cf-new.json >/dev/null
+          echo "Origin changed from $CURRENT to $DNS; waiting for CloudFront to deploy it..."
+          aws cloudfront wait distribution-deployed --id "$CF_ID"
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Brings the instance up to the newest image, in case deploys ran while it was stopped
+      - name: Deploy the latest API image
+        run: |
+          bash deploy/ship.sh "$EC2_ID" "${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}" latest "$AWS_REGION"
+
+      - name: Smoke test through CloudFront
+        run: |
+          DOMAIN=$(aws cloudfront get-distribution --id "$CF_ID" --query Distribution.DomainName --output text)
+          # Needs a login, so 401 means CloudFront -> nginx -> API -> RDS is all wired up
+          for _ in $(seq 1 30); do
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' "https://$DOMAIN/api/settings/status" || true)
+            echo "GET /api/settings/status -> $CODE"
+            case "$CODE" in 200|401|403) break ;; esac
+            sleep 10
+          done
+          case "$CODE" in 200|401|403) ;; *) echo "::error::API is not answering through CloudFront"; exit 1 ;; esac
+          {
+            echo "### Lab is running"
+            echo "App: https://$DOMAIN/"
+            echo ""
+            echo "Run **Lab control → stop** when you finish. The nightly schedule stops it otherwise."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  stop:
+    if: inputs.action == 'stop'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          mask-aws-account-id: true
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Stop EC2 and RDS
+        run: |
+          aws ec2 stop-instances --instance-ids "$EC2_ID" >/dev/null
+          STATUS=$(aws rds describe-db-instances --db-instance-identifier "$RDS_ID" \
+            --query 'DBInstances[0].DBInstanceStatus' --output text)
+          if [ "$STATUS" = "available" ]; then
+            aws rds stop-db-instance --db-instance-identifier "$RDS_ID" >/dev/null
+          else
+            echo "RDS is $STATUS, not stopping it"
+          fi
+          aws ec2 wait instance-stopped --instance-ids "$EC2_ID"
+          {
+            echo "### Lab stopped"
+            echo "EC2 is stopped; RDS was $STATUS and is now stopping."
+            echo "Only storage is billed now (about \$3/month)."
+          } >> "$GITHUB_STEP_SUMMARY"

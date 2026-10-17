@@ -1,0 +1,70 @@
+name: Frontend
+
+# Builds the SPA on every change under frontend/; on main it also deploys to S3 + CloudFront.
+# Does not touch EC2, so it works while the lab is stopped.
+on:
+  push:
+    branches: [main]
+    paths: ["frontend/**", ".github/workflows/frontend.yml"]
+  pull_request:
+    paths: ["frontend/**", ".github/workflows/frontend.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      # tsc --noEmit && vite build
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          retention-days: 3
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # GitHub OIDC -> AWS role, no stored access keys
+      contents: read
+    concurrency:
+      group: pharmacore-frontend
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: dist
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          mask-aws-account-id: true
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Upload to S3
+        working-directory: dist
+        run: |
+          # Hashed asset names never change: cache forever. Old assets are kept for open tabs.
+          aws s3 sync assets "s3://${{ secrets.S3_BUCKET }}/assets" \
+            --cache-control "public,max-age=31536000,immutable"
+          # index.html and the rest must be revalidated so a deploy shows up immediately
+          aws s3 sync . "s3://${{ secrets.S3_BUCKET }}" --exclude "assets/*" \
+            --cache-control "no-cache" --delete
+      - name: Invalidate CloudFront
+        run: |
+          aws cloudfront create-invalidation --distribution-id "${{ secrets.CF_DISTRIBUTION_ID }}" \
+            --paths "/" "/index.html" --query Invalidation.Id --output text
