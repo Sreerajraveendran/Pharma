@@ -37,3 +37,22 @@ jobs:
           echo "role name: ${ARN##*/}"
           ACCOUNT=$(echo "$ARN" | cut -d: -f5)
           echo "account id digits: ${#ACCOUNT} (must be 12)"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          mask-aws-account-id: true
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Which role did GitHub get, and can it send the command?
+        env:
+          EC2_ID: ${{ secrets.EC2_INSTANCE_ID }}
+        run: |
+          # The role name is printed; the account ID is masked
+          aws sts get-caller-identity --query Arn --output text | sed 's#.*assumed-role/#role: #; s#/.*##'
+          echo "instance id in secret: length ${#EC2_ID}, starts with '${EC2_ID:0:2}'"
+          aws ec2 describe-instances --instance-ids "$EC2_ID" \
+            --query 'Reservations[0].Instances[0].[State.Name, Placement.AvailabilityZone]' --output text
+          # A harmless command: if this works, SendCommand permissions are fine
+          aws ssm send-command --instance-ids "$EC2_ID" --document-name AWS-RunShellScript \
+            --parameters '{"commands":["echo permission-check-ok"]}' --query Command.Status --output text

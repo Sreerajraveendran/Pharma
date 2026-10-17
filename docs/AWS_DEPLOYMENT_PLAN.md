@@ -112,7 +112,7 @@ Runs on changes to `backend/**` or `deploy/**`: on push to `main`, on pull reque
 8. **Auto-stop:** EventBridge Scheduler with two daily schedules, for example 23:30 local time. They use the universal targets `ec2:stopInstances` and `rds:stopDBInstance`, through a role scoped to those two resources.
 9. **GitHub OIDC:**
    - Add the IAM identity provider `token.actions.githubusercontent.com` with audience `sts.amazonaws.com`.
-   - Role `pharmacore-gha` trusts `repo:<owner>/<repo>:ref:refs/heads/main`.
+   - Role `pharmacore-gha` trusts the `main` branch of this repo. GitHub's token now identifies it as `repo:<owner>@<owner-id>/<repo>@<repo-id>:ref:refs/heads/main`, so the trust policy allows that and the older `repo:<owner>/<repo>:ref:refs/heads/main` format.
    - Permissions:
      - S3 put, delete and list on the bucket.
      - `cloudfront:CreateInvalidation`, `GetDistribution`, `GetDistributionConfig` and `UpdateDistribution` on the distribution.

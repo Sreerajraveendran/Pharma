@@ -286,14 +286,21 @@ aws iam create-open-id-connect-provider \
   --url https://token.actions.githubusercontent.com \
   --client-id-list sts.amazonaws.com
 
+# GitHub's token now names the repo as owner@OWNER_ID/repo@REPO_ID. Allow both that and the older format.
+GH_OWNER=${GH_REPO%%/*}; GH_NAME=${GH_REPO##*/}
+GH_IDS=$(curl -fsS https://api.github.com/repos/$GH_REPO | jq -r '"\(.owner.id) \(.id)"')
+GH_OWNER_ID=${GH_IDS% *}; GH_REPO_ID=${GH_IDS#* }
+
 aws iam create-role --role-name pharmacore-gha --assume-role-policy-document "{
   \"Version\": \"2012-10-17\",
   \"Statement\": [{ \"Effect\": \"Allow\",
     \"Principal\": { \"Federated\": \"arn:aws:iam::$ACCOUNT:oidc-provider/token.actions.githubusercontent.com\" },
     \"Action\": \"sts:AssumeRoleWithWebIdentity\",
     \"Condition\": {
-      \"StringEquals\": { \"token.actions.githubusercontent.com:aud\": \"sts.amazonaws.com\",
-                         \"token.actions.githubusercontent.com:sub\": \"repo:$GH_REPO:ref:refs/heads/main\" } } }]
+      \"StringEquals\": { \"token.actions.githubusercontent.com:aud\": \"sts.amazonaws.com\" },
+      \"StringLike\": { \"token.actions.githubusercontent.com:sub\": [
+        \"repo:$GH_OWNER@$GH_OWNER_ID/$GH_NAME@$GH_REPO_ID:ref:refs/heads/main\",
+        \"repo:$GH_REPO:ref:refs/heads/main\" ] } } }]
 }" >/dev/null
 
 aws iam put-role-policy --role-name pharmacore-gha --policy-name deploy --policy-document "{

@@ -436,9 +436,29 @@ This uses OIDC: GitHub proves its identity to AWS, so you never store AWS keys i
    - **GitHub repository:** `Pharma`
    - **GitHub branch:** `main`
 3. Click **Next**, then **Next** again (skip managed permissions). **Role name:** `pharmacore-gha`. Click **Create role**.
-4. Open the role and check its trust policy:
-   - Open the **Trust relationships** tab. It must contain `repo:Sreerajraveendran/Pharma:ref:refs/heads/main`.
-   - This is what stops anyone else's repo or fork from using the role.
+4. **Fix the trust policy.** ⚠️ Don't skip this.
+   - **Why:** GitHub now puts the owner's and repo's permanent numeric IDs in the token it sends, e.g. `repo:Sreerajraveendran@186459430/Pharma@1409210444:ref:refs/heads/main`. The wizard writes the old format without the IDs, so AWS refuses with *"Not authorized to perform sts:AssumeRoleWithWebIdentity"*.
+   - **Find your two IDs:** open `https://api.github.com/repos/Sreerajraveendran/Pharma` in a browser. The top-level `"id"` is the **repo ID**; `"owner" → "id"` is the **owner ID**.
+   - **Edit the policy:** open **Trust relationships → Edit trust policy** and replace everything with the policy below. Put in your account ID and both GitHub IDs. Listing both formats keeps it working if GitHub ever sends the old one.
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [{
+       "Effect": "Allow",
+       "Principal": { "Federated": "arn:aws:iam::ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com" },
+       "Action": "sts:AssumeRoleWithWebIdentity",
+       "Condition": {
+         "StringEquals": { "token.actions.githubusercontent.com:aud": "sts.amazonaws.com" },
+         "StringLike": { "token.actions.githubusercontent.com:sub": [
+           "repo:Sreerajraveendran@OWNER_ID/Pharma@REPO_ID:ref:refs/heads/main",
+           "repo:Sreerajraveendran/Pharma:ref:refs/heads/main"
+         ] }
+       }
+     }]
+   }
+   ```
+   - Click **Update policy**.
+   - This is what stops anyone else's repo or fork from using the role: only `main` of this exact repo matches.
 5. Open the **Permissions** tab and choose **Add permissions → Create inline policy → JSON**. Paste this policy. Replace `REGION`, `ACCOUNT_ID`, `BUCKET`, `DIST_ID` and `INSTANCE_ID` everywhere they appear:
    ```json
    {
