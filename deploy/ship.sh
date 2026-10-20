@@ -22,8 +22,8 @@ for _ in $(seq 1 40); do
 done
 [ "$PING" = "Online" ] || { echo "::error::SSM agent on $INSTANCE_ID is not online"; exit 1; }
 
-# The three files are small, so they travel inside the command itself as a base64 tarball
-BUNDLE=$(tar czf - -C "$HERE" docker-compose.prod.yml nginx-api.conf deploy.sh | base64 -w0)
+# The deploy files are small, so they travel inside the command itself as a base64 tarball
+BUNDLE=$(tar czf - -C "$HERE" docker-compose.prod.yml docker-compose.cloudwatch.yml nginx-api.conf deploy.sh | base64 -w0)
 REMOTE="set -e; mkdir -p /opt/pharmacore; echo '$BUNDLE' | base64 -d | tar xzf - -C /opt/pharmacore; \
 bash /opt/pharmacore/deploy.sh '$IMAGE_REPO' '$IMAGE_TAG' '$REGION'"
 PARAMS=$(jq -nc --arg c "$REMOTE" '{commands: [$c], executionTimeout: ["900"]}')

@@ -1,0 +1,28 @@
+# Optional override: sends container logs to CloudWatch Logs instead of local files.
+# deploy.sh adds it when /pharmacore/prod/CLOUDWATCH_LOGS is "true". The log groups and the
+# pharmacore-ec2 role's logs permissions must exist first, or the containers refuse to start.
+# `docker compose logs` keeps working thanks to Docker's local cache (dual logging).
+# !override replaces the json-file logging block instead of merging its options into this one.
+services:
+  api:
+    logging: !override
+      driver: awslogs
+      options:
+        awslogs-region: ${AWS_REGION:?set by deploy.sh}
+        awslogs-group: /pharmacore/api
+        awslogs-create-group: "false"
+        tag: "{{.Name}}"
+        # Never block the app if CloudWatch is slow; drop log lines instead
+        mode: non-blocking
+        max-buffer-size: 4m
+
+  proxy:
+    logging: !override
+      driver: awslogs
+      options:
+        awslogs-region: ${AWS_REGION:?set by deploy.sh}
+        awslogs-group: /pharmacore/proxy
+        awslogs-create-group: "false"
+        tag: "{{.Name}}"
+        mode: non-blocking
+        max-buffer-size: 4m

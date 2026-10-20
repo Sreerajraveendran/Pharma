@@ -21,8 +21,17 @@ grep -q '^DATABASE_URL=' .env || { echo "DATABASE_URL is missing from /pharmacor
 aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "${IMAGE_REPO%%/*}"
 
 export API_IMAGE="$IMAGE_REPO:$IMAGE_TAG"
-docker compose -f docker-compose.prod.yml pull
-docker compose -f docker-compose.prod.yml up -d --remove-orphans
+export AWS_REGION="$REGION"
+
+# Container logs go to CloudWatch Logs only once /pharmacore/prod/CLOUDWATCH_LOGS is "true"
+COMPOSE=(docker compose -f docker-compose.prod.yml)
+if grep -qx 'CLOUDWATCH_LOGS=true' .env; then
+  COMPOSE+=(-f docker-compose.cloudwatch.yml)
+  echo "Logging to CloudWatch Logs (/pharmacore/api, /pharmacore/proxy)"
+fi
+
+"${COMPOSE[@]}" pull
+"${COMPOSE[@]}" up -d --remove-orphans
 
 # The container runs the Alembic migrations before uvicorn starts, so allow a few minutes
 for _ in $(seq 1 60); do
@@ -35,5 +44,5 @@ for _ in $(seq 1 60); do
 done
 
 echo "API did not become healthy; last log lines:"
-docker compose -f docker-compose.prod.yml logs --tail 50 api
+"${COMPOSE[@]}" logs --tail 50 api
 exit 1

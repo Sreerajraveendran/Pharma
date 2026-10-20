@@ -352,6 +352,25 @@ Don't add anything under the **Error pages** tab. A custom error page would repl
 ### 7g. Record the IDs
 On the distribution's **General** tab, copy the **Distribution ID** (`E...`) and the **Distribution domain name** (`d....cloudfront.net`) into your worksheet. Wait until **Last modified** shows a date instead of **Deploying** (about 5–10 minutes).
 
+### 7h. Security headers
+Locally, nginx adds security headers to every page ([frontend/nginx/security-headers.conf](../frontend/nginx/security-headers.conf)). On AWS, S3 serves the pages, so CloudFront has to add them instead. They apply to the browser → CloudFront leg, which is already HTTPS.
+
+1. Go to **CloudFront → Policies → Response headers** and click **Create response headers policy**. Name it `pharmacore-security-headers`.
+2. Under **Security headers**, set each of these and tick **Origin override** on each:
+   - **Strict-Transport-Security:** max-age `31536000`. Leave includeSubDomains and Preload unticked.
+   - **Content-Type-Options:** ticked (`nosniff`).
+   - **Frame-Options:** `DENY`.
+   - **Referrer-Policy:** `no-referrer`.
+   - **Content-Security-Policy:** use the same value as nginx:
+     ```
+     default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob: https:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+     ```
+   - Leave **XSS-Protection** unticked.
+3. Under **Custom headers**, add `Permissions-Policy` = `camera=(), microphone=(), geolocation=()` with **Origin override** ticked. Click **Create**.
+4. In **Distribution → Behaviors**, edit **Default (\*)** and set **Response headers policy** to `pharmacore-security-headers`, then **Save changes**. Do the same for **`/api/*`**.
+5. **Check it:** open the site, then **DevTools → Network**, and select the page request. **Response Headers** should list the headers above. Use the app and watch the **Console** for Content Security Policy errors.
+6. **To undo:** set **Response headers policy** back to **None**.
+
 ---
 
 ## Step 8: Nightly auto-stop (10 min)
@@ -541,3 +560,141 @@ From then on, the daily routine is **Lab control → start**, study and push, th
 | The site works, but `/api/...` returns **502** or **504** | The CloudFront origin is wrong, or EC2 is stopped | Step 7d: use the EC2 public DNS with HTTP only on port 80. Run Lab control → start |
 | Refreshing `/billing` shows **AccessDenied** | The function isn't attached | Step 7f |
 | The home page shows **AccessDenied** | The bucket policy is missing, or nothing has been uploaded yet | Step 7c, point 8, and run the Frontend workflow |
+
+---
+
+## Step 11 (after the first deploy): Monitoring with CloudWatch (45 min, about $0.75/month)
+
+So far, the only way to notice a problem is to open the site. This step adds four things:
+- **email alerts** through SNS;
+- **alarms** for the server, the database and the site;
+- **central logs**, so the API's and nginx's logs are kept in AWS rather than only on the server.
+
+Do the parts in order. In particular, 11d must be finished before 11e turns the logs on.
+
+| Part | Region | Cost/month |
+|---|---|---|
+| 11a SNS topic (eu-north-1) | eu-north-1 | $0 |
+| 11b Alarms for EC2 and RDS (6) | eu-north-1 | $0.60 |
+| 11c SNS topic + CloudFront alarm (1) | **us-east-1** | $0.10 |
+| 11d–11e Central logs | eu-north-1 | ~$0.02 |
+| Dashboard | skipped: it may cost $3/month; the Alarms page and the Monitoring tabs show the same graphs | $0 |
+
+### 11a. Where alerts go: an SNS topic
+1. Switch the region to **eu-north-1**. Open **Simple Notification Service (SNS) → Topics → Create topic**.
+2. **Type:** Standard. **Name:** `pharmacore-alerts`. Click **Create topic**.
+3. On the topic, click **Create subscription**:
+   - **Protocol:** Email
+   - **Endpoint:** your email address
+   - Click **Create subscription**.
+4. Open the email from AWS and click **Confirm subscription**. Until you do, the subscription shows **Pending confirmation** and no alert reaches you.
+
+### 11b. Alarms for EC2 and RDS (eu-north-1)
+For each row in the table, do this:
+1. Go to **CloudWatch → Alarms → All alarms → Create alarm → Select metric**.
+2. Find the metric: choose the namespace, then search for the instance or DB ID.
+3. Tick the metric, then click **Select metric**.
+4. Set **Statistic** and **Period** as in the table.
+5. **Conditions:** Static, and the threshold from the table.
+6. Open **Additional configuration**:
+   - **Datapoints to alarm:** as in the table, e.g. `2` out of `2`.
+   - **Missing data treatment:** ⚠️ **Treat missing data as good (not breaching threshold)**. The lab is stopped most of the time, and this stops the alarms complaining about it.
+7. Click **Next**. **Notification:** **In alarm**, then send to **pharmacore-alerts**. Click **Next**.
+8. **Alarm name:** the name from the table. Click **Next**, then **Create alarm**.
+
+| Alarm name | Namespace → metric | Statistic / Period | Condition | Datapoints |
+|---|---|---|---|---|
+| `pharmacore-ec2-status-check` | EC2 → Per-Instance Metrics → `StatusCheckFailed` | Maximum / 1 minute | ≥ `1` | 2 out of 2 |
+| `pharmacore-ec2-cpu-high` | EC2 → Per-Instance Metrics → `CPUUtilization` | Average / 5 minutes | > `80` | 3 out of 3 |
+| `pharmacore-ec2-cpu-credits-low` | EC2 → Per-Instance Metrics → `CPUCreditBalance` | Minimum / 5 minutes | < `20` | 1 out of 1 |
+| `pharmacore-rds-cpu-high` | RDS → Per-Database Metrics → `CPUUtilization` (pharmacore-db) | Average / 5 minutes | > `80` | 3 out of 3 |
+| `pharmacore-rds-storage-low` | RDS → Per-Database Metrics → `FreeStorageSpace` | Minimum / 5 minutes | < `2000000000` (2 GB, in bytes) | 1 out of 1 |
+| `pharmacore-rds-memory-low` | RDS → Per-Database Metrics → `FreeableMemory` | Minimum / 5 minutes | < `100000000` (100 MB, in bytes) | 3 out of 3 |
+
+**If you only want two alarms ($0.20/month),** make `pharmacore-ec2-status-check` and `pharmacore-rds-storage-low`.
+
+### 11c. Site error alarm for CloudFront (us-east-1)
+CloudFront's metrics only exist in **US East (N. Virginia) us-east-1**. An alarm can only notify an SNS topic in its own region, so this one needs its own topic.
+1. Switch the region to **us-east-1** and repeat **11a** there: create the topic `pharmacore-alerts-global`, subscribe your email, and confirm it.
+2. Go to **CloudWatch → Alarms → Create alarm → Select metric → CloudFront → Per-Distribution Metrics**. Pick `5xxErrorRate` for your distribution ID, with Region **Global**.
+3. Set:
+   - **Statistic:** Average. **Period:** 5 minutes.
+   - **Condition:** > `5` (percent).
+   - **Datapoints:** 2 out of 2.
+   - **Missing data:** treat as good.
+4. **Notification:** **pharmacore-alerts-global**. **Name:** `pharmacore-cloudfront-5xx`. Create it.
+5. Switch the region back to **eu-north-1**.
+
+### 11d. Prepare central logs (do this before 11e)
+**Create two log groups.**
+1. Go to **CloudWatch → Logs → Log groups → Create log group**.
+2. Create the first group:
+   - **Name:** `/pharmacore/api`
+   - **Retention setting:** ⚠️ **1 week**. The default, "Never expire", keeps every log forever.
+   - **Log class:** Standard
+   - Click **Create**.
+3. Create a second group, **`/pharmacore/proxy`**, with the same settings.
+
+**Let the server write to them.**
+4. Go to **IAM → Roles → pharmacore-ec2 → Add permissions → Create inline policy → JSON** and paste this, with your account ID in place of `ACCOUNT_ID`:
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [
+       { "Effect": "Allow",
+         "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+         "Resource": "arn:aws:logs:eu-north-1:ACCOUNT_ID:log-group:/pharmacore/*:*" }
+     ]
+   }
+   ```
+5. Click **Next**. **Policy name:** `cloudwatch-logs`. Click **Create policy**.
+6. Check it was **saved**: the role's **Permissions** tab should now list `app-params` **and** `cloudwatch-logs`.
+
+### 11e. Turn central logs on
+The deploy script switches Docker's logs to CloudWatch only when this setting is `true`. If it's on before 11d is done, the containers refuse to start.
+
+1. Go to **Systems Manager → Parameter Store → Create parameter**:
+   - **Name:** `/pharmacore/prod/CLOUDWATCH_LOGS`
+   - **Type:** String
+   - **Value:** `true`
+2. Run **Lab control → start**. If the lab is already running, run **Backend → Run workflow** instead. The deploy log should show:
+   ```
+   Logging to CloudWatch Logs (/pharmacore/api, /pharmacore/proxy)
+   API is up: ...
+   ```
+3. Use the site for a minute: log in and open a few pages.
+4. Go to **CloudWatch → Log groups → /pharmacore/api** and open the newest **log stream**. The API's log lines are there.
+
+**To turn it off:** set the parameter to `false` and deploy again. The logs then go back to local files on the server.
+
+### 11f. Searching logs (Logs Insights)
+Go to **CloudWatch → Logs → Logs Insights**, select `/pharmacore/api` (or both groups), and run a query.
+
+Last 50 errors:
+```
+fields @timestamp, @message
+| filter @message like /ERROR|Traceback| 500 /
+| sort @timestamp desc
+| limit 50
+```
+
+Requests that got a 401 or 429 at the proxy (in `/pharmacore/proxy`):
+```
+fields @timestamp, @message
+| filter @message like / 401 | 429 /
+| sort @timestamp desc
+| limit 50
+```
+
+Queries cost $0.005 per GB scanned, so a few cents at most for study use.
+
+### 11g. Check the alarms
+1. Go to **CloudWatch → Alarms**. With the lab stopped, every alarm should show **OK**, thanks to "missing data = good".
+2. **Test that email works:** select `pharmacore-ec2-cpu-high` and choose **Actions → Edit**. Temporarily change the threshold to `> 0`, run **Lab control → start**, and within about 15 minutes you should get an email. Then set the threshold back to `80`.
+
+### Costs to avoid
+- **Dashboards:** may cost $3/month each.
+- **EC2 detailed monitoring:** about $2+/month.
+- **CloudFront additional metrics:** about $1+/month.
+- **Synthetics canaries:** about $10/month.
+- **Log retention "Never expire".**

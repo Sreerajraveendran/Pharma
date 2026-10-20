@@ -76,6 +76,7 @@ Runs on changes to `backend/**` or `deploy/**`: on push to `main`, on pull reque
   - `api` uses the image `${ECR_REPO}:${IMAGE_TAG}`, `env_file: .env`, `restart: unless-stopped`, port `127.0.0.1:8000:8000` (used for the health check).
   - `proxy` is `nginx:1.27-alpine` on `80:80`, mounting `nginx-api.conf`, `restart: unless-stopped`.
   - There is no postgres service.
+- **[deploy/docker-compose.cloudwatch.yml](../deploy/docker-compose.cloudwatch.yml):** an optional override that sends the api and proxy logs to the CloudWatch Logs groups `/pharmacore/api` and `/pharmacore/proxy`. `deploy.sh` adds it only when the parameter `/pharmacore/prod/CLOUDWATCH_LOGS` is `true`. The setup is step 11 of the console guide.
 - **[deploy/nginx-api.conf](../deploy/nginx-api.conf):**
   - Copy the `limit_req_zone`, the `/api/auth/login`, `/api/auth/register` and `/api/` locations, `client_max_body_size 20m`, gzip and `proxy_read_timeout 120s` from [frontend/nginx/nginx.conf](../frontend/nginx/nginx.conf). Leave out the static-file and SPA blocks.
   - Add `set_real_ip_from 0.0.0.0/0; real_ip_header X-Forwarded-For; real_ip_recursive off;`. With recursive off, nginx uses the last XFF entry, which is the client IP CloudFront appends. The security group allows only CloudFront, so this is safe, and the per-IP rate limits and audit-log IPs stay correct.
